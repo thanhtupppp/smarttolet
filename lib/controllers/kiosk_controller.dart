@@ -30,11 +30,38 @@ class KioskController extends ChangeNotifier {
   Duration _activeCooldownRemaining = Duration.zero;
   Timer? _cooldownTicker;
   Timer? _resetTimer;
+  Timer? _privacyPurgeTimer;
   String? _activeFaceId;
 
-  KioskController(this._settingsService) {
+  KioskController(
+    this._settingsService, {
+    bool enableBackgroundPurge = true,
+  }) {
     _config = _settingsService.loadConfig();
     _initDriver();
+    _restoreCooldownProfilesFromDb();
+    if (enableBackgroundPurge) {
+      _startPeriodicPrivacyPurge();
+    }
+  }
+
+  Future<void> _restoreCooldownProfilesFromDb() async {
+    try {
+      final profiles = await _settingsService.databaseService.loadActiveCooldownProfiles();
+      final now = DateTime.now();
+      profiles.forEach((faceId, embedding) {
+        _activeEmbeddings[faceId] = embedding;
+        _cooldownMap[faceId] = now.add(Duration(minutes: _config.cooldownMinutes));
+      });
+    } catch (_) {}
+  }
+
+  void _startPeriodicPrivacyPurge() {
+    _privacyPurgeTimer?.cancel();
+    // Chạy dọn dẹp mỗi 10 phút để tự động xóa sạch dữ liệu khuôn mặt và log quá hạn
+    _privacyPurgeTimer = Timer.periodic(const Duration(minutes: 10), (_) {
+      _settingsService.databaseService.purgeExpiredData().catchError((_) => 0);
+    });
   }
 
   // Getters
@@ -160,6 +187,14 @@ class KioskController extends ChangeNotifier {
     _cooldownMap[faceId] = expiry;
     _activeEmbeddings[faceId] = queryEmbedding;
 
+    // Lưu bền vững vào SQLite để chống gian lận khi tắt mở lại Kiosk
+    _settingsService.databaseService.saveActiveCooldownFace(
+      faceHash: faceId,
+      embedding: queryEmbedding,
+      expiry: expiry,
+      note: 'Auto Cooldown',
+    ).catchError((_) {});
+
     _voicePrompt.playPrompt(
       VoicePromptType.dispensing,
       paperLengthCm: _config.paperLengthCm,
@@ -284,6 +319,7 @@ class KioskController extends ChangeNotifier {
 
   @override
   void dispose() {
+    _privacyPurgeTimer?.cancel();
     _cooldownTicker?.cancel();
     _resetTimer?.cancel();
     _driver?.dispose();

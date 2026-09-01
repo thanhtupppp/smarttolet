@@ -45,10 +45,10 @@ class FaceDetectorService {
       options: FaceDetectorOptions(
         enableLandmarks: true,
         enableContours: false,
-        enableClassification: false,
+        enableClassification: true, // Bật phân loại mắt mở/nhắm để phát hiện người thật
         enableTracking: false,
-        minFaceSize: 0.1, // Siêu nhạy ở mọi khoảng cách từ 30cm đến 2.5m
-        performanceMode: FaceDetectorMode.fast, // 60 FPS
+        minFaceSize: 0.18, // Chỉ nhận khuôn mặt đủ lớn đứng trước Kiosk (~35cm - 1.2m)
+        performanceMode: FaceDetectorMode.accurate, // Chế độ chính xác cao, loại bỏ tối đa false positive
       ),
     );
   }
@@ -68,12 +68,32 @@ class FaceDetectorService {
       final faces = await _detector.processImage(inputImage);
       if (faces.isEmpty) return null;
 
-      // Lấy khuôn mặt lớn nhất ở chính diện
-      final mainFace = faces.reduce((a, b) =>
+      // BỘ LỌC 1: Góc quay đầu (Head Pose Gate) - Chỉ nhận khuôn mặt nhìn thẳng vào camera
+      final validFrontalFaces = faces.where((f) {
+        final yaw = f.headEulerAngleY ?? 0;   // Quay trái / phải
+        final roll = f.headEulerAngleZ ?? 0;  // Nghiêng đầu sang vai
+        final pitch = f.headEulerAngleX ?? 0; // Ngước lên / cúi xuống
+        return yaw.abs() <= 20 && roll.abs() <= 16 && pitch.abs() <= 20;
+      }).toList();
+
+      if (validFrontalFaces.isEmpty) return null;
+
+      // Lấy khuôn mặt lớn nhất ở vị trí trung tâm
+      final mainFace = validFrontalFaces.reduce((a, b) =>
           (a.boundingBox.width * a.boundingBox.height) >
                   (b.boundingBox.width * b.boundingBox.height)
               ? a
               : b);
+
+      // BỘ LỌC 2: Kiểm tra người thật qua trạng thái mở mắt (Eye Open Liveness Gate)
+      final leftEyeOpen = mainFace.leftEyeOpenProbability;
+      final rightEyeOpen = mainFace.rightEyeOpenProbability;
+      if (leftEyeOpen != null && rightEyeOpen != null) {
+        // Cả 2 mắt phải mở rõ (chống mắt nhắm, ảnh tĩnh mắt nhắm, hoặc vật thể tròn không có mắt)
+        if (leftEyeOpen < 0.30 || rightEyeOpen < 0.30) {
+          return null;
+        }
+      }
 
       return _extractFaceFeatures(mainFace);
     } catch (e) {
@@ -87,11 +107,18 @@ class FaceDetectorService {
   }
 
   /// Trích xuất 7 đặc trưng sinh trắc học độc bản từ các điểm mốc của Google ML Kit
-  DetectedFaceInfo _extractFaceFeatures(Face face) {
+  DetectedFaceInfo? _extractFaceFeatures(Face face) {
     final box = face.boundingBox;
     final boxWidth = box.width > 0 ? box.width : 1.0;
     final boxHeight = box.height > 0 ? box.height : 1.0;
     final boxRatio = boxHeight / boxWidth;
+
+    // BỘ LỌC 3: Tỷ lệ nhân trắc học hình dáng mặt người (Aspect Ratio Gate)
+    // Mặt người thật luôn có chiều cao > chiều ngang (tỷ lệ chuẩn từ 1.08 đến 1.70).
+    // Vật tròn (cốc, nắp chai ~ 1.0) hoặc vật dài (chai lọ, hộp > 1.8 hoặc dẹt < 1.0) bị loại ngay!
+    if (boxRatio < 1.06 || boxRatio > 1.75) {
+      return null;
+    }
 
     // 1. Tọa độ các điểm mốc sinh trắc học
     final leftEye = face.landmarks[FaceLandmarkType.leftEye]?.position;
@@ -103,37 +130,37 @@ class FaceDetectorService {
     final leftCheek = face.landmarks[FaceLandmarkType.leftCheek]?.position;
     final rightCheek = face.landmarks[FaceLandmarkType.rightCheek]?.position;
 
-    // 2. Tính khoảng cách 2 mắt / bề ngang mặt
-    double eyeDistanceRatio = 0.45;
-    if (leftEye != null && rightEye != null) {
-      final eyeDist = (rightEye.x - leftEye.x).abs();
-      eyeDistanceRatio = (eyeDist / boxWidth).clamp(0.2, 0.8);
+    // BỘ LỌC 4: Toàn vẹn cấu trúc giải phẫu học (Anatomical Integrity Check)
+    // BẮT BUỘC phải có đủ 2 mắt, sống mũi và khóe miệng. Không cho phép fallback giá trị giả!
+    if (leftEye == null || rightEye == null || noseBase == null || leftMouth == null || rightMouth == null) {
+      return null;
     }
 
-    // 3. Tính bề rộng khuôn miệng / khoảng cách 2 mắt
-    double mouthWidthRatio = 0.9;
-    if (leftMouth != null && rightMouth != null && leftEye != null && rightEye != null) {
-      final mDist = (rightMouth.x - leftMouth.x).abs();
-      final eDist = (rightEye.x - leftEye.x).abs();
-      if (eDist > 0) {
-        mouthWidthRatio = (mDist / eDist).clamp(0.3, 1.8);
-      }
+    // Mắt phải ở trên mũi, và mũi phải ở trên miệng
+    final eyesCenterY = (leftEye.y + rightEye.y) / 2.0;
+    final mouthCenterY = (leftMouth.y + rightMouth.y) / 2.0;
+    if (eyesCenterY >= noseBase.y || noseBase.y >= mouthCenterY) {
+      return null; // Thứ tự không gian sai lệch so với khuôn mặt người
     }
+
+    // 2. Tính khoảng cách 2 mắt / bề ngang mặt
+    final eyeDist = (rightEye.x - leftEye.x).abs();
+    final eyeDistanceRatio = (eyeDist / boxWidth).clamp(0.2, 0.8);
+
+    // 3. Tính bề rộng khuôn miệng / khoảng cách 2 mắt
+    final mDist = (rightMouth.x - leftMouth.x).abs();
+    final mouthWidthRatio = eyeDist > 0 ? (mDist / eyeDist).clamp(0.3, 1.8) : 0.9;
 
     // 4. Tính khoảng cách mũi đến miệng / chiều cao mặt
     double noseToMouthRatio = 0.25;
-    if (noseBase != null && bottomMouth != null) {
+    if (bottomMouth != null) {
       final nmDist = (bottomMouth.y - noseBase.y).abs();
       noseToMouthRatio = (nmDist / boxHeight).clamp(0.1, 0.6);
     }
 
     // 5. Tính khoảng cách từ mắt đến mũi / chiều cao mặt
-    double eyeToNoseRatio = 0.35;
-    if (leftEye != null && rightEye != null && noseBase != null) {
-      final eyeCenterY = (leftEye.y + rightEye.y) / 2.0;
-      final enDist = (noseBase.y - eyeCenterY).abs();
-      eyeToNoseRatio = (enDist / boxHeight).clamp(0.1, 0.7);
-    }
+    final enDist = (noseBase.y - eyesCenterY).abs();
+    final eyeToNoseRatio = (enDist / boxHeight).clamp(0.1, 0.7);
 
     // 6. Tính khoảng cách 2 xương gò má / bề ngang mặt
     double cheekWidthRatio = 0.85;
@@ -143,14 +170,9 @@ class FaceDetectorService {
     }
 
     // 7. Tính tỉ lệ đối xứng tâm mặt
-    double faceSymmetryRatio = 1.0;
-    if (leftEye != null && rightEye != null && noseBase != null) {
-      final leftDist = (noseBase.x - leftEye.x).abs();
-      final rightDist = (rightEye.x - noseBase.x).abs();
-      if (rightDist > 0) {
-        faceSymmetryRatio = (leftDist / rightDist).clamp(0.5, 2.0);
-      }
-    }
+    final leftDist = (noseBase.x - leftEye.x).abs();
+    final rightDist = (rightEye.x - noseBase.x).abs();
+    final faceSymmetryRatio = rightDist > 0 ? (leftDist / rightDist).clamp(0.5, 2.0) : 1.0;
 
     // 8. Tạo mã định danh độc bản duy nhất
     final featureSeed = 'face_${(boxRatio * 100).round()}_${(eyeDistanceRatio * 100).round()}_${(mouthWidthRatio * 100).round()}_${(noseToMouthRatio * 100).round()}';

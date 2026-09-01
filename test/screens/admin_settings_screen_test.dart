@@ -16,7 +16,8 @@ void main() {
 
     SharedPreferences.setMockInitialValues({});
     final settingsService = await SettingsService.init();
-    final controller = KioskController(settingsService);
+    final controller = KioskController(settingsService, enableBackgroundPurge: false);
+    addTearDown(controller.dispose);
 
     await tester.pumpWidget(
       ChangeNotifierProvider<KioskController>.value(

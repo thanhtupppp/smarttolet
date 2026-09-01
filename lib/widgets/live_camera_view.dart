@@ -46,6 +46,7 @@ class _LiveCameraViewState extends State<LiveCameraView>
   DateTime _lastProcessedTime = DateTime.now();
   Rect? _detectedFaceRect;
   String _mlStatus = 'AI Google ML Kit: Đang quét...';
+  int _consecutiveFaceHits = 0;
 
   late AnimationController _pulseController;
   late Animation<double> _pulseAnimation;
@@ -148,16 +149,25 @@ class _LiveCameraViewState extends State<LiveCameraView>
 
       if (mounted) {
         if (faceInfo != null) {
-          setState(() {
-            _detectedFaceRect = faceInfo.boundingBox;
-            _mlStatus = '🟢 ĐÃ NHẬN DIỆN KHUÔN MẶT!';
-          });
+          _consecutiveFaceHits++;
+          if (_consecutiveFaceHits >= 2) {
+            setState(() {
+              _detectedFaceRect = faceInfo.boundingBox;
+              _mlStatus = '🟢 ĐÃ XÁC THỰC NGƯỜI THẬT!';
+            });
 
-          // Tự động kích hoạt cấp giấy hoặc kiểm tra Cooldown
-          if (widget.onRealFaceDetected != null) {
-            widget.onRealFaceDetected!(faceInfo);
+            // Tự động kích hoạt cấp giấy hoặc kiểm tra Cooldown khi đã xác nhận ổn định
+            if (widget.onRealFaceDetected != null) {
+              widget.onRealFaceDetected!(faceInfo);
+            }
+          } else {
+            setState(() {
+              _detectedFaceRect = faceInfo.boundingBox;
+              _mlStatus = 'AI Google ML Kit: Đang xác thực...';
+            });
           }
         } else {
+          _consecutiveFaceHits = 0;
           if (_detectedFaceRect != null) {
             setState(() {
               _detectedFaceRect = null;
