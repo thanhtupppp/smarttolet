@@ -48,11 +48,14 @@ class KioskController extends ChangeNotifier {
   Future<void> _restoreCooldownProfilesFromDb() async {
     try {
       final profiles = await _settingsService.databaseService.loadActiveCooldownProfiles();
-      final now = DateTime.now();
-      profiles.forEach((faceId, embedding) {
-        _activeEmbeddings[faceId] = embedding;
-        _cooldownMap[faceId] = now.add(Duration(minutes: _config.cooldownMinutes));
-      });
+      for (final profile in profiles) {
+        if (profile.embedding192d != null) {
+          _activeEmbeddings[profile.faceHash] = profile.embedding192d!;
+          if (profile.expiresAt != null) {
+            _cooldownMap[profile.faceHash] = profile.expiresAt!;
+          }
+        }
+      }
     } catch (_) {}
   }
 
@@ -131,9 +134,44 @@ class KioskController extends ChangeNotifier {
     }
   }
 
+  // --- DEBUG & TELEMETRY GETTERS ---
+  String? _debugLastScannedFaceId;
+  int? _debugLastTrackingId;
+  double? _debugLastSimilarity;
+  String? _debugMatchedCooldownFaceId;
+  String? _debugVerdict;
+  double? _debugLeftEye;
+  double? _debugRightEye;
+
+  String? get debugLastScannedFaceId => _debugLastScannedFaceId;
+  int? get debugLastTrackingId => _debugLastTrackingId;
+  double? get debugLastSimilarity => _debugLastSimilarity;
+  String? get debugMatchedCooldownFaceId => _debugMatchedCooldownFaceId;
+  String? get debugVerdict => _debugVerdict;
+  double? get debugLeftEye => _debugLeftEye;
+  double? get debugRightEye => _debugRightEye;
+
+  void updateLiveTrackingDebug({
+    required int? trackingId,
+    required double? leftEye,
+    required double? rightEye,
+    required String seed,
+  }) {
+    _debugLastTrackingId = trackingId;
+    _debugLeftEye = leftEye;
+    _debugRightEye = rightEye;
+    _debugLastScannedFaceId = seed;
+    notifyListeners();
+  }
+
+  int? _lastDispensedTrackingId;
+  DateTime? _lastDispenseFinishedAt;
+
   /// Triggered when face is detected in Camera Viewfinder
   Future<void> triggerFaceDetected(
     String faceId, {
+    List<double>? embedding192d,
+    int? trackingId,
     double boundingBoxRatio = 1.3,
     double eyeDistanceRatio = 0.45,
     double mouthWidthRatio = 0.9,
@@ -144,14 +182,36 @@ class KioskController extends ChangeNotifier {
   }) async {
     if (_status != KioskStatus.idle) return;
 
+    // Khóa chống gian lận 1: Nếu cùng 1 người vẫn đứng trước camera (trùng tracking ID của ML Kit)
+    if (trackingId != null && trackingId == _lastDispensedTrackingId) {
+      _debugLastScannedFaceId = faceId;
+      _debugLastTrackingId = trackingId;
+      _debugVerdict = 'TRÙNG TRACK ID #$trackingId (CÙNG NGƯỜI ĐỨNG) -> CHẶN';
+      notifyListeners();
+
+      final remainingMins = (getCooldownRemaining(faceId).inSeconds / 60).ceil();
+      _voicePrompt.playPrompt(
+        VoicePromptType.cooldown,
+        remainingMinutes: remainingMins > 0 ? remainingMins : _config.cooldownMinutes,
+      );
+      _startCooldownView(faceId);
+      return;
+    }
+
+    // Khóa chống gian lận 2: Không cấp liên tiếp nếu vừa hoàn thành cấp giấy chưa đầy 5 giây
+    if (_lastDispenseFinishedAt != null &&
+        DateTime.now().difference(_lastDispenseFinishedAt!) < const Duration(seconds: 5)) {
+      return;
+    }
+
     _purgeExpiredCooldowns();
     _activeFaceId = faceId;
     _status = KioskStatus.scanning;
     _errorMessage = null;
     notifyListeners();
 
-    // 1. Extract 192-d MobileFaceNet vector embedding from 7 biometric dimensions
-    final queryEmbedding = FaceEmbeddingService.extractEmbedding(
+    // 1. Sử dụng vector từ Deep Learning MobileFaceNet (nếu có), hoặc fallback về pseudo-embedding
+    final queryEmbedding = embedding192d ?? FaceEmbeddingService.extractEmbedding(
       boundingBoxRatio: boundingBoxRatio,
       eyeDistanceRatio: eyeDistanceRatio,
       mouthWidthRatio: mouthWidthRatio,
@@ -162,17 +222,26 @@ class KioskController extends ChangeNotifier {
       rawFeaturesSeed: faceId,
     );
 
-    // 2. Check if this face vector matches any person currently in cooldown (Cosine Similarity >= 0.75)
-    final matchedCooldownId = FaceEmbeddingService.findMatchingCooldownFace(
+    // 2. So khớp Cosine Similarity với danh sách khuôn mặt đang trong Cooldown
+    final matchResult = FaceEmbeddingService.evaluateMatch(
       queryEmbedding: queryEmbedding,
       activeEmbeddings: _activeEmbeddings,
     );
 
+    _debugLastScannedFaceId = faceId;
+    _debugLastTrackingId = trackingId;
+    _debugLastSimilarity = matchResult.highestSimilarity;
+    _debugMatchedCooldownFaceId = matchResult.matchedId ?? matchResult.closestFaceId;
+
     // UX delay for scanning animation
     await Future.delayed(const Duration(milliseconds: 600));
 
-    if (matchedCooldownId != null || isUnderCooldown(faceId)) {
-      final effectiveId = matchedCooldownId ?? faceId;
+    if (matchResult.isMatch || isUnderCooldown(faceId)) {
+      final effectiveId = matchResult.matchedId ?? faceId;
+      final simPercent = (matchResult.highestSimilarity * 100).toStringAsFixed(1);
+      _debugVerdict = 'TRÙNG ID: $effectiveId (Sim: $simPercent% >= 75%) -> COOLDOWN';
+      notifyListeners();
+
       final remainingMins = (getCooldownRemaining(effectiveId).inSeconds / 60).ceil();
       _voicePrompt.playPrompt(
         VoicePromptType.cooldown,
@@ -182,10 +251,17 @@ class KioskController extends ChangeNotifier {
       return;
     }
 
-    // 3. Allowed: Store vector embedding & set Cooldown timestamp immediately in transient memory
+    // 3. Người mới: Lưu vector nhúng & mốc Cooldown duy nhất 1 lần
     final expiry = DateTime.now().add(Duration(minutes: _config.cooldownMinutes));
     _cooldownMap[faceId] = expiry;
     _activeEmbeddings[faceId] = queryEmbedding;
+    _lastDispensedTrackingId = trackingId;
+
+    final maxSimText = matchResult.highestSimilarity > 0
+        ? ' (Max Sim: ${(matchResult.highestSimilarity * 100).toStringAsFixed(1)}% < 75%)'
+        : '';
+    _debugVerdict = 'KHÁCH MỚI$maxSimText -> CẤP GIẤY';
+    notifyListeners();
 
     // Lưu bền vững vào SQLite để chống gian lận khi tắt mở lại Kiosk
     _settingsService.databaseService.saveActiveCooldownFace(
@@ -245,10 +321,6 @@ class KioskController extends ChangeNotifier {
 
     if (success) {
       _status = KioskStatus.success;
-      
-      // Register Cooldown for this faceId
-      final expiry = DateTime.now().add(Duration(minutes: _config.cooldownMinutes));
-      _cooldownMap[faceId] = expiry;
 
       // Update paper used in config
       final addedMeters = targetCm / 100.0;
@@ -273,6 +345,7 @@ class KioskController extends ChangeNotifier {
       // Return to idle after 4 seconds
       _resetTimer?.cancel();
       _resetTimer = Timer(const Duration(seconds: 4), () {
+        _lastDispenseFinishedAt = DateTime.now();
         resetToIdle();
       });
     } else {

@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'dart:math';
 import 'dart:ui';
 import 'package:flutter/foundation.dart';
@@ -10,6 +11,10 @@ import 'face_embedding_service.dart';
 /// - Chuẩn hóa Pixel: [-1.0, 1.0] qua (pixel - 127.5) / 128.0
 /// - Vector chuẩn hóa L2 trên hình cầu đơn vị (Unit Hypersphere)
 class MobileFaceNetService {
+  static final MobileFaceNetService instance = MobileFaceNetService._internal();
+  factory MobileFaceNetService() => instance;
+  MobileFaceNetService._internal();
+
   static const String modelAssetPath = 'assets/models/mobilefacenet.tflite';
   static const int inputSize = 112;
   static const int embeddingDimension = 192;
@@ -23,6 +28,7 @@ class MobileFaceNetService {
   /// Khởi tạo Interpreter duy nhất 1 lần (Singleton pattern cho TFLite)
   Future<void> init() async {
     if (_isModelLoaded || _isInitializing) return;
+    if (Platform.environment.containsKey('FLUTTER_TEST')) return;
     _isInitializing = true;
 
     try {

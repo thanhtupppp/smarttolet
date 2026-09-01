@@ -44,15 +44,18 @@ class CooldownTimerView extends StatelessWidget {
             child: const Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Icon(Icons.hourglass_top_rounded, color: KioskTheme.warningAmber, size: 20),
+                Icon(Icons.hourglass_top_rounded, color: KioskTheme.warningAmber, size: 18),
                 SizedBox(width: 8),
-                Text(
-                  'THỜI GIAN CHỜ (COOLDOWN)',
-                  style: TextStyle(
-                    color: KioskTheme.warningAmber,
-                    fontSize: 14,
-                    fontWeight: FontWeight.bold,
-                    letterSpacing: 1.0,
+                Flexible(
+                  child: Text(
+                    'THỜI GIAN CHỜ (COOLDOWN)',
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: KioskTheme.warningAmber,
+                      fontSize: 13,
+                      fontWeight: FontWeight.bold,
+                      letterSpacing: 0.8,
+                    ),
                   ),
                 ),
               ],

@@ -341,8 +341,8 @@ class KioskDatabaseService {
     );
   }
 
-  /// Đọc các khuôn mặt đang trong thời gian Cooldown còn hiệu lực
-  Future<Map<String, List<double>>> loadActiveCooldownProfiles() async {
+  /// Đọc các khuôn mặt đang trong thời gian Cooldown còn hiệu lực (bao gồm cả hạn expiresAt)
+  Future<List<FaceProfile>> loadActiveCooldownProfiles() async {
     final nowMs = DateTime.now().millisecondsSinceEpoch;
     final rows = await database.query(
       'face_profiles',
@@ -350,14 +350,7 @@ class KioskDatabaseService {
       whereArgs: [nowMs],
     );
 
-    final Map<String, List<double>> result = {};
-    for (final row in rows) {
-      final profile = FaceProfile.fromMap(row);
-      if (profile.embedding192d != null) {
-        result[profile.faceHash] = profile.embedding192d!;
-      }
-    }
-    return result;
+    return rows.map((row) => FaceProfile.fromMap(row)).toList();
   }
 
   // ==========================================

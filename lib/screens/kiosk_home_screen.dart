@@ -44,7 +44,11 @@ class KioskHomeScreen extends StatelessWidget {
             children: [
               // Kiosk Top App Bar
               _buildTopBar(context, controller),
-              const SizedBox(height: 16),
+              const SizedBox(height: 10),
+
+              // Real-Time AI Face Telemetry & Debug HUD
+              _buildDebugHud(context, controller),
+              const SizedBox(height: 10),
 
               // Main Interactive Center Viewport
               Expanded(
@@ -55,7 +59,7 @@ class KioskHomeScreen extends StatelessWidget {
                   ),
                 ),
               ),
-              const SizedBox(height: 16),
+              const SizedBox(height: 12),
 
               // Bottom Simulation / Control Tray
               _buildBottomControlBar(context, controller),
@@ -170,9 +174,19 @@ class KioskHomeScreen extends StatelessWidget {
           isFaceDetected: false,
           statusText: 'VUI LÒNG NHÌN VÀO CAMERA',
           activeColor: KioskTheme.primaryCyan,
+          onFaceTrackingUpdate: (faceInfo) {
+            controller.updateLiveTrackingDebug(
+              trackingId: faceInfo.trackingId,
+              leftEye: faceInfo.leftEyeOpen,
+              rightEye: faceInfo.rightEyeOpen,
+              seed: faceInfo.faceFeatureSeed,
+            );
+          },
           onRealFaceDetected: (faceInfo) {
             controller.triggerFaceDetected(
               faceInfo.faceFeatureSeed,
+              embedding192d: faceInfo.embedding192d,
+              trackingId: faceInfo.trackingId,
               boundingBoxRatio: faceInfo.boundingBoxRatio,
               eyeDistanceRatio: faceInfo.eyeDistanceRatio,
               mouthWidthRatio: faceInfo.mouthWidthRatio,
@@ -260,7 +274,7 @@ class KioskHomeScreen extends StatelessWidget {
 
   Widget _buildBottomControlBar(BuildContext context, KioskController controller) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
       decoration: BoxDecoration(
         color: KioskTheme.surface.withValues(alpha: 0.85),
         borderRadius: BorderRadius.circular(20),
@@ -271,12 +285,133 @@ class KioskHomeScreen extends StatelessWidget {
         children: [
           const Icon(Icons.verified_user_rounded, color: KioskTheme.accentGreen, size: 16),
           const SizedBox(width: 8),
+          Flexible(
+            child: Text(
+              'Định mức: ${controller.config.paperLengthCm}cm • Chờ: ${controller.config.cooldownMinutes}p • AI Tự Động',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                color: KioskTheme.textSecondary,
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDebugHud(BuildContext context, KioskController controller) {
+    final hasData = controller.debugLastScannedFaceId != null;
+    final isMatch = controller.debugVerdict?.contains('TRÙNG') == true;
+    final isCooldown = controller.status == KioskStatus.cooldown;
+    final verdictColor = isMatch || isCooldown ? KioskTheme.warningAmber : KioskTheme.accentGreen;
+
+    final leftEyePct = controller.debugLeftEye != null
+        ? '${(controller.debugLeftEye! * 100).round()}%'
+        : '--';
+    final rightEyePct = controller.debugRightEye != null
+        ? '${(controller.debugRightEye! * 100).round()}%'
+        : '--';
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.88),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: (hasData ? verdictColor : Colors.white24).withValues(alpha: 0.5),
+          width: 1.2,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: (hasData ? verdictColor : Colors.transparent).withValues(alpha: 0.15),
+            blurRadius: 10,
+            spreadRadius: 1,
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Header: Telemetry Title & Status Pill
+          Row(
+            children: [
+              Icon(Icons.radar_rounded, color: verdictColor, size: 16),
+              const SizedBox(width: 6),
+              const Text(
+                'AI FACE DEBUG TELEMETRY',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 0.8,
+                ),
+              ),
+              const Spacer(),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                decoration: BoxDecoration(
+                  color: verdictColor.withValues(alpha: 0.2),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: verdictColor.withValues(alpha: 0.5)),
+                ),
+                child: Text(
+                  controller.debugVerdict?.contains('TRÙNG') == true
+                      ? 'ĐÃ TRÙNG COOLDOWN'
+                      : (controller.debugLastScannedFaceId != null ? 'KHÁCH MỚI' : 'CHỜ MẶT'),
+                  style: TextStyle(
+                    color: verdictColor,
+                    fontSize: 9,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+
+          // Row 1: Face ID & Tracking ID & Eye Open Probs
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  'ID: ${controller.debugLastScannedFaceId ?? '---'}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: KioskTheme.primaryCyan,
+                    fontSize: 11,
+                    fontFamily: 'monospace',
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Text(
+                'Track #${controller.debugLastTrackingId ?? '--'}  •  Mắt L: $leftEyePct | R: $rightEyePct',
+                style: const TextStyle(
+                  color: KioskTheme.textSecondary,
+                  fontSize: 10,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 2),
+
+          // Row 2: Match result & Cosine similarity
           Text(
-            'Định mức: ${controller.config.paperLengthCm}cm  •  Cooldown: ${controller.config.cooldownMinutes} phút  •  AI Camera Tự Động',
-            style: const TextStyle(
-              color: KioskTheme.textSecondary,
-              fontSize: 12,
-              fontWeight: FontWeight.w600,
+            'Kết quả: ${controller.debugVerdict ?? 'Đang đợi khuôn mặt trong khung quét...'}',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              color: verdictColor,
+              fontSize: 11,
+              fontWeight: FontWeight.bold,
             ),
           ),
         ],

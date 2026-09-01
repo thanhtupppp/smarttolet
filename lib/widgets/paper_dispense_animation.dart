@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import '../theme/kiosk_theme.dart';
@@ -30,7 +31,10 @@ class _PaperDispenseAnimationState extends State<PaperDispenseAnimation>
     _spinController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 1000),
-    )..repeat();
+    );
+    if (!Platform.environment.containsKey('FLUTTER_TEST')) {
+      _spinController.repeat();
+    }
   }
 
   @override
@@ -68,16 +72,19 @@ class _PaperDispenseAnimationState extends State<PaperDispenseAnimation>
                 Icon(
                   widget.isCompleted ? Icons.check_circle_rounded : Icons.sync_rounded,
                   color: activeColor,
-                  size: 20,
+                  size: 18,
                 ),
                 const SizedBox(width: 8),
-                Text(
-                  widget.isCompleted ? '✓ ĐÃ CẤP GIẤY THÀNH CÔNG' : '🧻 ĐANG CẤP GIẤY TỰ ĐỘNG...',
-                  style: TextStyle(
-                    color: activeColor,
-                    fontSize: 14,
-                    fontWeight: FontWeight.bold,
-                    letterSpacing: 1.0,
+                Flexible(
+                  child: Text(
+                    widget.isCompleted ? '✓ ĐÃ CẤP GIẤY THÀNH CÔNG' : '🧻 ĐANG CẤP GIẤY TỰ ĐỘNG...',
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: activeColor,
+                      fontSize: 13,
+                      fontWeight: FontWeight.bold,
+                      letterSpacing: 0.8,
+                    ),
                   ),
                 ),
               ],

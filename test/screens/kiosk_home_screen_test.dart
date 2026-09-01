@@ -16,7 +16,7 @@ void main() {
 
     SharedPreferences.setMockInitialValues({});
     final settingsService = await SettingsService.init();
-    final controller = KioskController(settingsService);
+    final controller = KioskController(settingsService, enableBackgroundPurge: false);
 
     await tester.pumpWidget(
       ChangeNotifierProvider<KioskController>.value(
@@ -38,9 +38,11 @@ void main() {
     // Should transition to scanning state
     expect(find.text('ĐANG PHÂN TÍCH KHUÔN MẶT...'), findsOneWidget);
 
-    // Advance animation past analyzing delay and dispensing steps
+    // Advance animation past analyzing delay (600ms) and dispensing (40 steps x 30ms)
     await tester.pump(const Duration(milliseconds: 700));
-    await tester.pump(const Duration(seconds: 2));
+    for (int i = 0; i < 45; i++) {
+      await tester.pump(const Duration(milliseconds: 35));
+    }
 
     // Should complete dispensing and reach success state
     expect(find.text('✓ ĐÃ CẤP GIẤY THÀNH CÔNG'), findsOneWidget);
@@ -48,7 +50,5 @@ void main() {
     // Pump past the 4-second auto-reset timer to return to idle cleanly
     await tester.pump(const Duration(seconds: 5));
     expect(find.text('VUI LÒNG NHÌN VÀO CAMERA'), findsOneWidget);
-
-    controller.dispose();
   });
 }

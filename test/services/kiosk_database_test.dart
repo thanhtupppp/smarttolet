@@ -176,9 +176,11 @@ void main() {
 
       // 3. Kiểm tra loadActiveCooldownProfiles chỉ nạp mặt còn hạn
       final activeProfiles = await dbService.loadActiveCooldownProfiles();
-      expect(activeProfiles.containsKey('active_user_face'), isTrue);
-      expect(activeProfiles['active_user_face']!.length, equals(192));
-      expect(activeProfiles.containsKey('expired_user_face'), isFalse);
+      final hasActive = activeProfiles.any((p) => p.faceHash == 'active_user_face');
+      final hasExpired = activeProfiles.any((p) => p.faceHash == 'expired_user_face');
+      expect(hasActive, isTrue);
+      expect(hasExpired, isFalse);
+      expect(activeProfiles.firstWhere((p) => p.faceHash == 'active_user_face').embedding192d?.length, equals(192));
 
       // 4. Chạy Privacy Purge
       final purged = await dbService.purgeExpiredData();

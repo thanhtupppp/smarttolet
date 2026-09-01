@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
@@ -20,6 +21,7 @@ class LiveCameraView extends StatefulWidget {
   final String statusText;
   final Color activeColor;
   final FaceDetectedCallback? onRealFaceDetected;
+  final void Function(DetectedFaceInfo faceInfo)? onFaceTrackingUpdate;
 
   const LiveCameraView({
     super.key,
@@ -27,6 +29,7 @@ class LiveCameraView extends StatefulWidget {
     required this.statusText,
     required this.activeColor,
     this.onRealFaceDetected,
+    this.onFaceTrackingUpdate,
   });
 
   @override
@@ -45,6 +48,8 @@ class _LiveCameraViewState extends State<LiveCameraView>
   bool _isProcessingFrame = false;
   DateTime _lastProcessedTime = DateTime.now();
   Rect? _detectedFaceRect;
+  DetectedFaceInfo? _detectedFaceInfo;
+  Size? _cameraPreviewSize;
   String _mlStatus = 'AI Google ML Kit: Đang quét...';
   int _consecutiveFaceHits = 0;
 
@@ -59,7 +64,10 @@ class _LiveCameraViewState extends State<LiveCameraView>
     _pulseController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 1200),
-    )..repeat(reverse: true);
+    );
+    if (!Platform.environment.containsKey('FLUTTER_TEST')) {
+      _pulseController.repeat(reverse: true);
+    }
 
     _pulseAnimation = Tween<double>(begin: 0.96, end: 1.04).animate(
       CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
@@ -69,6 +77,7 @@ class _LiveCameraViewState extends State<LiveCameraView>
   }
 
   Future<void> _initCameraFlow() async {
+    if (Platform.environment.containsKey('FLUTTER_TEST')) return;
     try {
       // 1. Xin quyền Camera
       final status = await Permission.camera.request();
@@ -112,6 +121,15 @@ class _LiveCameraViewState extends State<LiveCameraView>
 
       await _cameraController!.initialize();
 
+      final preview = _cameraController!.value.previewSize;
+      if (preview != null) {
+        if (!kIsWeb && Platform.isAndroid) {
+          _cameraPreviewSize = Size(preview.height, preview.width);
+        } else {
+          _cameraPreviewSize = Size(preview.width, preview.height);
+        }
+      }
+
       // 3. Khởi chạy luồng phân tích hình ảnh AI theo thời gian thực
       await _cameraController!.startImageStream(_handleCameraFrame);
 
@@ -149,8 +167,22 @@ class _LiveCameraViewState extends State<LiveCameraView>
 
       if (mounted) {
         if (faceInfo != null) {
-          _consecutiveFaceHits++;
+          _detectedFaceInfo = faceInfo;
+          if (widget.onFaceTrackingUpdate != null) {
+            widget.onFaceTrackingUpdate!(faceInfo);
+          }
+
+          final isSameLocation = _detectedFaceRect == null ||
+              (faceInfo.boundingBox.center - _detectedFaceRect!.center).distance < 120.0;
+
+          if (isSameLocation) {
+            _consecutiveFaceHits++;
+          } else {
+            _consecutiveFaceHits = 1; // Nhảy vị trí đột ngột, bắt đầu tính lại chu kỳ ổn định
+          }
+
           if (_consecutiveFaceHits >= 2) {
+            _consecutiveFaceHits = 0; // Reset bộ đếm chu kỳ để tránh kích hoạt dồn dập
             setState(() {
               _detectedFaceRect = faceInfo.boundingBox;
               _mlStatus = '🟢 ĐÃ XÁC THỰC NGƯỜI THẬT!';
@@ -163,17 +195,19 @@ class _LiveCameraViewState extends State<LiveCameraView>
           } else {
             setState(() {
               _detectedFaceRect = faceInfo.boundingBox;
-              _mlStatus = 'AI Google ML Kit: Đang xác thực...';
+              _mlStatus = 'AI Google ML Kit: Đang xác thực (Frame 1/2)...';
             });
           }
         } else {
           _consecutiveFaceHits = 0;
-          if (_detectedFaceRect != null) {
-            setState(() {
-              _detectedFaceRect = null;
-              _mlStatus = 'AI Google ML Kit: Đang tìm khuôn mặt...';
-            });
-          }
+          final dropReason = _faceDetectorService?.lastDropReason ?? '';
+          setState(() {
+            _detectedFaceRect = null;
+            _detectedFaceInfo = null;
+            _mlStatus = dropReason.isNotEmpty
+                ? 'AI: $dropReason'
+                : 'AI Google ML Kit: Đang tìm khuôn mặt...';
+          });
         }
       }
     } catch (_) {
@@ -267,7 +301,10 @@ class _LiveCameraViewState extends State<LiveCameraView>
                           child: CustomPaint(
                             painter: _FaceBoundingBoxPainter(
                               faceRect: _detectedFaceRect!,
+                              previewSize: _cameraPreviewSize,
                               color: KioskTheme.accentGreen,
+                              trackingId: _detectedFaceInfo?.trackingId,
+                              isFrontCamera: _activeCamera?.lensDirection == CameraLensDirection.front,
                             ),
                           ),
                         ),
@@ -354,29 +391,149 @@ class _LiveCameraViewState extends State<LiveCameraView>
 
 class _FaceBoundingBoxPainter extends CustomPainter {
   final Rect faceRect;
+  final Size? previewSize;
   final Color color;
+  final int? trackingId;
+  final bool isFrontCamera;
 
-  _FaceBoundingBoxPainter({required this.faceRect, required this.color});
+  _FaceBoundingBoxPainter({
+    required this.faceRect,
+    this.previewSize,
+    required this.color,
+    this.trackingId,
+    this.isFrontCamera = true,
+  });
 
   @override
   void paint(Canvas canvas, Size size) {
-    final paint = Paint()
+    Rect mappedRect;
+
+    if (previewSize != null && previewSize!.width > 0 && previewSize!.height > 0) {
+      final double scaleX = size.width / previewSize!.width;
+      final double scaleY = size.height / previewSize!.height;
+      final double scale = max(scaleX, scaleY);
+
+      final double offsetX = (size.width - previewSize!.width * scale) / 2.0;
+      final double offsetY = (size.height - previewSize!.height * scale) / 2.0;
+
+      double left, right;
+      if (isFrontCamera) {
+        // Gương lật ngang đối với Camera trước trên Android/iOS
+        left = size.width - (faceRect.right * scale + offsetX);
+        right = size.width - (faceRect.left * scale + offsetX);
+      } else {
+        left = faceRect.left * scale + offsetX;
+        right = faceRect.right * scale + offsetX;
+      }
+
+      final double top = faceRect.top * scale + offsetY;
+      final double bottom = faceRect.bottom * scale + offsetY;
+
+      mappedRect = Rect.fromLTRB(
+        left.clamp(0.0, size.width),
+        top.clamp(0.0, size.height),
+        right.clamp(0.0, size.width),
+        bottom.clamp(0.0, size.height),
+      );
+    } else {
+      mappedRect = Rect.fromCenter(
+        center: Offset(size.width / 2, size.height / 2),
+        width: size.width * 0.65,
+        height: size.height * 0.75,
+      );
+    }
+
+    // 1. Nền mờ nhẹ bên trong khuôn mặt
+    final fillPaint = Paint()
+      ..color = color.withValues(alpha: 0.08)
+      ..style = PaintingStyle.fill;
+    final rrect = RRect.fromRectAndRadius(mappedRect, const Radius.circular(16));
+    canvas.drawRRect(rrect, fillPaint);
+
+    // 2. Viền mỏng toàn khung
+    final borderPaint = Paint()
+      ..color = color.withValues(alpha: 0.35)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.5;
+    canvas.drawRRect(rrect, borderPaint);
+
+    // 3. Bốn góc định vị HUD Cyberpunk nổi bật (Corner Brackets)
+    final cornerPaint = Paint()
       ..color = color
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 3.0;
+      ..strokeCap = StrokeCap.round
+      ..strokeWidth = 3.5;
 
-    final centerBox = Rect.fromCenter(
-      center: Offset(size.width / 2, size.height / 2),
-      width: size.width * 0.65,
-      height: size.height * 0.75,
+    final cornerLen = (min(mappedRect.width, mappedRect.height) * 0.22).clamp(14.0, 32.0);
+
+    // Góc trên bên trái
+    canvas.drawLine(Offset(mappedRect.left, mappedRect.top + cornerLen), Offset(mappedRect.left, mappedRect.top), cornerPaint);
+    canvas.drawLine(Offset(mappedRect.left, mappedRect.top), Offset(mappedRect.left + cornerLen, mappedRect.top), cornerPaint);
+
+    // Góc trên bên phải
+    canvas.drawLine(Offset(mappedRect.right - cornerLen, mappedRect.top), Offset(mappedRect.right, mappedRect.top), cornerPaint);
+    canvas.drawLine(Offset(mappedRect.right, mappedRect.top), Offset(mappedRect.right, mappedRect.top + cornerLen), cornerPaint);
+
+    // Góc dưới bên trái
+    canvas.drawLine(Offset(mappedRect.left, mappedRect.bottom - cornerLen), Offset(mappedRect.left, mappedRect.bottom), cornerPaint);
+    canvas.drawLine(Offset(mappedRect.left, mappedRect.bottom), Offset(mappedRect.left + cornerLen, mappedRect.bottom), cornerPaint);
+
+    // Góc dưới bên phải
+    canvas.drawLine(Offset(mappedRect.right - cornerLen, mappedRect.bottom), Offset(mappedRect.right, mappedRect.bottom), cornerPaint);
+    canvas.drawLine(Offset(mappedRect.right, mappedRect.bottom), Offset(mappedRect.right, mappedRect.bottom - cornerLen), cornerPaint);
+
+    // 4. Tâm ngắm chữ thập ở giữa khuôn mặt
+    final center = mappedRect.center;
+    const crossLen = 6.0;
+    final crossPaint = Paint()
+      ..color = color.withValues(alpha: 0.6)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.5;
+    canvas.drawLine(Offset(center.dx - crossLen, center.dy), Offset(center.dx + crossLen, center.dy), crossPaint);
+    canvas.drawLine(Offset(center.dx, center.dy - crossLen), Offset(center.dx, center.dy + crossLen), crossPaint);
+
+    // 5. Thẻ Tag Tracking ID bám sát trên đầu khuôn mặt
+    final trackText = trackingId != null ? '🟢 TRACK #$trackingId' : '🟢 FACE LOCKED';
+    final textPainter = TextPainter(
+      text: TextSpan(
+        text: ' $trackText ',
+        style: const TextStyle(
+          color: Colors.white,
+          fontSize: 10,
+          fontWeight: FontWeight.bold,
+          letterSpacing: 0.5,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+
+    final badgeRect = Rect.fromLTWH(
+      mappedRect.left + 4,
+      max(2.0, mappedRect.top - 18),
+      textPainter.width + 6,
+      textPainter.height + 4,
     );
+    final badgePaint = Paint()
+      ..color = Colors.black.withValues(alpha: 0.75)
+      ..style = PaintingStyle.fill;
+    canvas.drawRRect(RRect.fromRectAndRadius(badgeRect, const Radius.circular(6)), badgePaint);
 
-    final rrect = RRect.fromRectAndRadius(centerBox, const Radius.circular(20));
-    canvas.drawRRect(rrect, paint);
+    final badgeBorder = Paint()
+      ..color = color.withValues(alpha: 0.8)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.0;
+    canvas.drawRRect(RRect.fromRectAndRadius(badgeRect, const Radius.circular(6)), badgeBorder);
+
+    textPainter.paint(canvas, Offset(badgeRect.left + 3, badgeRect.top + 2));
   }
 
   @override
-  bool shouldRepaint(covariant _FaceBoundingBoxPainter oldDelegate) => true;
+  bool shouldRepaint(covariant _FaceBoundingBoxPainter oldDelegate) {
+    return oldDelegate.faceRect != faceRect ||
+        oldDelegate.trackingId != trackingId ||
+        oldDelegate.previewSize != previewSize ||
+        oldDelegate.color != color;
+  }
 }
 
 class _CameraGridPainter extends CustomPainter {

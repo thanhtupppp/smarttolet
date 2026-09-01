@@ -9,6 +9,9 @@ import 'camera_image_converter.dart';
 
 class DetectedFaceInfo {
   final Rect boundingBox;
+  final int? trackingId;
+  final double? leftEyeOpen;
+  final double? rightEyeOpen;
   final double? headEulerAngleY;
   final double? headEulerAngleZ;
   final double boundingBoxRatio;
@@ -23,6 +26,9 @@ class DetectedFaceInfo {
 
   DetectedFaceInfo({
     required this.boundingBox,
+    this.trackingId,
+    this.leftEyeOpen,
+    this.rightEyeOpen,
     this.headEulerAngleY,
     this.headEulerAngleZ,
     required this.boundingBoxRatio,
@@ -39,21 +45,26 @@ class DetectedFaceInfo {
 
 /// Service tích hợp Google ML Kit Face Detection và Deep Learning MobileFaceNet TFLite
 class FaceDetectorService {
-  late final FaceDetector _detector;
+  FaceDetector? _detector;
   late final MobileFaceNetService _mobileFaceNet;
   bool _isProcessing = false;
+  String _lastDropReason = '';
+
+  String get lastDropReason => _lastDropReason;
 
   FaceDetectorService({MobileFaceNetService? mobileFaceNet}) {
-    _detector = FaceDetector(
-      options: FaceDetectorOptions(
-        enableLandmarks: true,
-        enableContours: false,
-        enableClassification: true, // Bật phân loại mắt mở/nhắm để phát hiện người thật
-        enableTracking: false,
-        minFaceSize: 0.18, // Chỉ nhận khuôn mặt đủ lớn đứng trước Kiosk (~35cm - 1.2m)
-        performanceMode: FaceDetectorMode.accurate, // Chế độ chính xác cao, loại bỏ tối đa false positive
-      ),
-    );
+    if (!Platform.environment.containsKey('FLUTTER_TEST')) {
+      _detector = FaceDetector(
+        options: FaceDetectorOptions(
+          enableLandmarks: true,
+          enableContours: false,
+          enableClassification: true, // Bật phân loại mắt mở/nhắm để phát hiện người thật
+          enableTracking: true, // Bật tracking liên tục người đứng trước camera
+          minFaceSize: 0.15, // Nhạy hơn ở cự ly 35cm - 1.5m
+          performanceMode: FaceDetectorMode.fast, // Tốc độ xử lý cao 60 FPS, phản hồi tức thì
+        ),
+      );
+    }
     _mobileFaceNet = mobileFaceNet ?? MobileFaceNetService();
     _mobileFaceNet.init();
   }
@@ -69,21 +80,34 @@ class FaceDetectorService {
     _isProcessing = true;
 
     try {
+      if (_detector == null) {
+        if (kDebugMode) {
+          print('[FaceDetectorService] Running without ML Kit (FLUTTER_TEST / Mock mode)');
+        }
+        return null;
+      }
+
       final inputImage = _convertCameraImageToInputImage(image, camera);
       if (inputImage == null) return null;
 
-      final faces = await _detector.processImage(inputImage);
-      if (faces.isEmpty) return null;
+      final faces = await _detector!.processImage(inputImage);
+      if (faces.isEmpty) {
+        _lastDropReason = 'Không thấy khuôn mặt';
+        return null;
+      }
 
       // BỘ LỌC 1: Góc quay đầu (Head Pose Gate) - Chỉ nhận khuôn mặt nhìn thẳng vào camera
       final validFrontalFaces = faces.where((f) {
         final yaw = f.headEulerAngleY ?? 0;   // Quay trái / phải
         final roll = f.headEulerAngleZ ?? 0;  // Nghiêng đầu sang vai
         final pitch = f.headEulerAngleX ?? 0; // Ngước lên / cúi xuống
-        return yaw.abs() <= 20 && roll.abs() <= 16 && pitch.abs() <= 20;
+        return yaw.abs() <= 28 && roll.abs() <= 22 && pitch.abs() <= 25;
       }).toList();
 
-      if (validFrontalFaces.isEmpty) return null;
+      if (validFrontalFaces.isEmpty) {
+        _lastDropReason = 'Vui lòng nhìn thẳng camera';
+        return null;
+      }
 
       // Lấy khuôn mặt lớn nhất ở vị trí trung tâm
       final mainFace = validFrontalFaces.reduce((a, b) =>
@@ -92,18 +116,29 @@ class FaceDetectorService {
               ? a
               : b);
 
-      // BỘ LỌC 2: Kiểm tra người thật qua trạng thái mở mắt (Eye Open Liveness Gate)
+      // BỘ LỌC 2 (Fail-Fast): Tỷ lệ nhân trắc học hình dáng mặt người (Aspect Ratio Gate)
+      final boxWidth = mainFace.boundingBox.width > 0 ? mainFace.boundingBox.width : 1.0;
+      final boxHeight = mainFace.boundingBox.height > 0 ? mainFace.boundingBox.height : 1.0;
+      final boxRatio = boxHeight / boxWidth;
+      if (boxRatio < 1.02 || boxRatio > 1.85) {
+        _lastDropReason = 'Tỷ lệ hình học bất thường';
+        return null;
+      }
+
+      // BỘ LỌC 3: Kiểm tra người thật qua trạng thái mở mắt (nếu ML Kit phân loại được)
       final leftEyeOpen = mainFace.leftEyeOpenProbability;
       final rightEyeOpen = mainFace.rightEyeOpenProbability;
       if (leftEyeOpen != null && rightEyeOpen != null) {
-        // Cả 2 mắt phải mở rõ (chống mắt nhắm, ảnh tĩnh mắt nhắm, hoặc vật thể tròn không có mắt)
-        if (leftEyeOpen < 0.30 || rightEyeOpen < 0.30) {
+        if (leftEyeOpen < 0.20 && rightEyeOpen < 0.20) {
+          _lastDropReason = 'Mắt đang nhắm';
           return null;
         }
       }
 
       final features = _extractFaceFeatures(mainFace);
       if (features == null) return null;
+
+      _lastDropReason = '';
 
       // BƯỚC 5: Cắt trực tiếp vùng khuôn mặt sang ảnh 112x112 RGB và đưa vào mạng MobileFaceNet TFLite
       final faceImage112 = CameraImageConverter.cropFaceToImage112(
@@ -118,6 +153,9 @@ class FaceDetectorService {
 
       return DetectedFaceInfo(
         boundingBox: features.boundingBox,
+        trackingId: mainFace.trackingId,
+        leftEyeOpen: leftEyeOpen,
+        rightEyeOpen: rightEyeOpen,
         headEulerAngleY: features.headEulerAngleY,
         headEulerAngleZ: features.headEulerAngleZ,
         boundingBoxRatio: features.boundingBoxRatio,
@@ -147,10 +185,9 @@ class FaceDetectorService {
     final boxHeight = box.height > 0 ? box.height : 1.0;
     final boxRatio = boxHeight / boxWidth;
 
-    // BỘ LỌC 3: Tỷ lệ nhân trắc học hình dáng mặt người (Aspect Ratio Gate)
-    // Mặt người thật luôn có chiều cao > chiều ngang (tỷ lệ chuẩn từ 1.08 đến 1.70).
-    // Vật tròn (cốc, nắp chai ~ 1.0) hoặc vật dài (chai lọ, hộp > 1.8 hoặc dẹt < 1.0) bị loại ngay!
-    if (boxRatio < 1.06 || boxRatio > 1.75) {
+    // BỘ LỌC 3: Kích thước bounding box tối thiểu (tránh bàn tay giơ lên hoặc vật siêu nhỏ)
+    if (boxWidth < 60.0 || boxHeight < 70.0) {
+      _lastDropReason = 'Khuôn mặt quá nhỏ hoặc quá xa';
       return null;
     }
 
@@ -164,9 +201,11 @@ class FaceDetectorService {
     final leftCheek = face.landmarks[FaceLandmarkType.leftCheek]?.position;
     final rightCheek = face.landmarks[FaceLandmarkType.rightCheek]?.position;
 
-    // BỘ LỌC 4: Toàn vẹn cấu trúc giải phẫu học (Anatomical Integrity Check)
-    // BẮT BUỘC phải có đủ 2 mắt, sống mũi và khóe miệng. Không cho phép fallback giá trị giả!
+    // BỘ LỌC 4: Toàn vẹn cấu trúc giải phẫu học (5 điểm mốc cốt lõi)
+    // BẮT BUỘC phải có đủ 5 điểm ngũ quan cơ bản: 2 mắt, sống mũi, và 2 khóe miệng!
+    // Bất kỳ hành vi lấy tay che nửa mặt, che mắt, hay che miệng -> Sẽ thiếu ít nhất 1 điểm -> BỊ TỪ CHỐI!
     if (leftEye == null || rightEye == null || noseBase == null || leftMouth == null || rightMouth == null) {
+      _lastDropReason = 'Thiếu ngũ quan (bị che tay)';
       return null;
     }
 
@@ -174,7 +213,8 @@ class FaceDetectorService {
     final eyesCenterY = (leftEye.y + rightEye.y) / 2.0;
     final mouthCenterY = (leftMouth.y + rightMouth.y) / 2.0;
     if (eyesCenterY >= noseBase.y || noseBase.y >= mouthCenterY) {
-      return null; // Thứ tự không gian sai lệch so với khuôn mặt người
+      _lastDropReason = 'Thứ tự ngũ quan sai lệch';
+      return null;
     }
 
     // 2. Tính khoảng cách 2 mắt / bề ngang mặt
@@ -185,7 +225,7 @@ class FaceDetectorService {
     final mDist = (rightMouth.x - leftMouth.x).abs();
     final mouthWidthRatio = eyeDist > 0 ? (mDist / eyeDist).clamp(0.3, 1.8) : 0.9;
 
-    // 4. Tính khoảng cách mũi đến miệng / chiều cao mặt
+    // 4. Tính khoảng cách mũi đến miệng / chiều cao mặt (sử dụng bottomMouth nếu có)
     double noseToMouthRatio = 0.25;
     if (bottomMouth != null) {
       final nmDist = (bottomMouth.y - noseBase.y).abs();
@@ -196,7 +236,7 @@ class FaceDetectorService {
     final enDist = (noseBase.y - eyesCenterY).abs();
     final eyeToNoseRatio = (enDist / boxHeight).clamp(0.1, 0.7);
 
-    // 6. Tính khoảng cách 2 xương gò má / bề ngang mặt
+    // 6. Tính khoảng cách 2 xương gò má / bề ngang mặt (sử dụng cheeks nếu có)
     double cheekWidthRatio = 0.85;
     if (leftCheek != null && rightCheek != null) {
       final cDist = (rightCheek.x - leftCheek.x).abs();
@@ -268,7 +308,7 @@ class FaceDetectorService {
   }
 
   void dispose() {
-    _detector.close();
+    _detector?.close();
     _mobileFaceNet.dispose();
   }
 }

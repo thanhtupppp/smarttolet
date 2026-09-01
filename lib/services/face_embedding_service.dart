@@ -81,6 +81,34 @@ class FaceEmbeddingService {
     return normalizeL2(vector);
   }
 
+  /// Đối chiếu vector khuôn mặt với thông số độ tương đồng chi tiết phục vụ Telemetry/Debug
+  static FaceMatchResult evaluateMatch({
+    required List<double> queryEmbedding,
+    required Map<String, List<double>> activeEmbeddings,
+    double threshold = matchThreshold,
+  }) {
+    String? matchedId;
+    String? closestId;
+    double highestSimilarity = -1.0;
+
+    for (final entry in activeEmbeddings.entries) {
+      final similarity = cosineSimilarity(queryEmbedding, entry.value);
+      if (similarity > highestSimilarity) {
+        highestSimilarity = similarity;
+        closestId = entry.key;
+      }
+      if (similarity >= threshold && (matchedId == null || similarity >= highestSimilarity)) {
+        matchedId = entry.key;
+      }
+    }
+
+    return FaceMatchResult(
+      matchedId: matchedId,
+      highestSimilarity: highestSimilarity < 0 ? 0.0 : highestSimilarity,
+      closestFaceId: closestId,
+    );
+  }
+
   /// Đối chiếu vector khuôn mặt vừa quét với danh sách khuôn mặt đang trong Cooldown
   /// Trả về FaceId nếu phát hiện trùng khớp, ngược lại trả về null
   static String? findMatchingCooldownFace({
@@ -88,17 +116,25 @@ class FaceEmbeddingService {
     required Map<String, List<double>> activeEmbeddings,
     double threshold = matchThreshold,
   }) {
-    String? matchedId;
-    double highestSimilarity = -1.0;
-
-    for (final entry in activeEmbeddings.entries) {
-      final similarity = cosineSimilarity(queryEmbedding, entry.value);
-      if (similarity >= threshold && similarity > highestSimilarity) {
-        highestSimilarity = similarity;
-        matchedId = entry.key;
-      }
-    }
-
-    return matchedId;
+    return evaluateMatch(
+      queryEmbedding: queryEmbedding,
+      activeEmbeddings: activeEmbeddings,
+      threshold: threshold,
+    ).matchedId;
   }
+}
+
+/// Kết quả so khớp vector khuôn mặt chi tiết
+class FaceMatchResult {
+  final String? matchedId;
+  final double highestSimilarity;
+  final String? closestFaceId;
+
+  const FaceMatchResult({
+    this.matchedId,
+    required this.highestSimilarity,
+    this.closestFaceId,
+  });
+
+  bool get isMatch => matchedId != null;
 }
