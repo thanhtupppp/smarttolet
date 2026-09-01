@@ -4,6 +4,8 @@ import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart';
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
 import 'face_embedding_service.dart';
+import 'mobile_facenet_service.dart';
+import 'camera_image_converter.dart';
 
 class DetectedFaceInfo {
   final Rect boundingBox;
@@ -35,12 +37,13 @@ class DetectedFaceInfo {
   });
 }
 
-/// Service tích hợp Google ML Kit Face Detection và MobileFaceNet Embedding
+/// Service tích hợp Google ML Kit Face Detection và Deep Learning MobileFaceNet TFLite
 class FaceDetectorService {
   late final FaceDetector _detector;
+  late final MobileFaceNetService _mobileFaceNet;
   bool _isProcessing = false;
 
-  FaceDetectorService() {
+  FaceDetectorService({MobileFaceNetService? mobileFaceNet}) {
     _detector = FaceDetector(
       options: FaceDetectorOptions(
         enableLandmarks: true,
@@ -51,7 +54,11 @@ class FaceDetectorService {
         performanceMode: FaceDetectorMode.accurate, // Chế độ chính xác cao, loại bỏ tối đa false positive
       ),
     );
+    _mobileFaceNet = mobileFaceNet ?? MobileFaceNetService();
+    _mobileFaceNet.init();
   }
+
+  MobileFaceNetService get mobileFaceNet => _mobileFaceNet;
 
   /// Xử lý phân tích một frame hình ảnh từ luồng Camera
   Future<DetectedFaceInfo?> processCameraImage({
@@ -95,7 +102,34 @@ class FaceDetectorService {
         }
       }
 
-      return _extractFaceFeatures(mainFace);
+      final features = _extractFaceFeatures(mainFace);
+      if (features == null) return null;
+
+      // BƯỚC 5: Cắt trực tiếp vùng khuôn mặt sang ảnh 112x112 RGB và đưa vào mạng MobileFaceNet TFLite
+      final faceImage112 = CameraImageConverter.cropFaceToImage112(
+        cameraImage: image,
+        boundingBox: mainFace.boundingBox,
+      );
+
+      final deepEmbedding = _mobileFaceNet.predict(
+        faceImage112,
+        fallbackSeed: features.faceFeatureSeed,
+      );
+
+      return DetectedFaceInfo(
+        boundingBox: features.boundingBox,
+        headEulerAngleY: features.headEulerAngleY,
+        headEulerAngleZ: features.headEulerAngleZ,
+        boundingBoxRatio: features.boundingBoxRatio,
+        eyeDistanceRatio: features.eyeDistanceRatio,
+        mouthWidthRatio: features.mouthWidthRatio,
+        noseToMouthRatio: features.noseToMouthRatio,
+        eyeToNoseRatio: features.eyeToNoseRatio,
+        cheekWidthRatio: features.cheekWidthRatio,
+        faceSymmetryRatio: features.faceSymmetryRatio,
+        faceFeatureSeed: features.faceFeatureSeed,
+        embedding192d: deepEmbedding,
+      );
     } catch (e) {
       if (kDebugMode) {
         print('[FaceDetectorService] ML Kit Error: $e');
@@ -235,5 +269,6 @@ class FaceDetectorService {
 
   void dispose() {
     _detector.close();
+    _mobileFaceNet.dispose();
   }
 }
